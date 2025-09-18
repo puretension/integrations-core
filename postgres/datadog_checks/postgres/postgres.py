@@ -140,12 +140,23 @@ class PostgreSql(AgentCheck):
         self.set_resource_tags()
         self.pg_settings = {}
         self._warnings_by_code = {}
-        self.db_pool = LRUConnectionPoolManager(
-            max_db=self._config.max_connections,
-            base_conn_args=self.build_connection_args(),
-            statement_timeout=self._config.query_timeout,
-            sqlascii_encodings=self._config.query_encodings,
-        )
+        
+        # Use conn_args_provider for managed authentication to enable token refresh
+        if self._uses_managed_authentication():
+            self.db_pool = LRUConnectionPoolManager(
+                max_db=self._config.max_connections,
+                conn_args_provider=self.build_connection_args,
+                statement_timeout=self._config.query_timeout,
+                sqlascii_encodings=self._config.query_encodings,
+                token_refresh_ttl_s=600,  # Refresh every 10 minutes (AWS IAM tokens expire in 15)
+            )
+        else:
+            self.db_pool = LRUConnectionPoolManager(
+                max_db=self._config.max_connections,
+                base_conn_args=self.build_connection_args(),
+                statement_timeout=self._config.query_timeout,
+                sqlascii_encodings=self._config.query_encodings,
+            )
         self.metrics_cache = PostgresMetricsCache(self._config)
         self.statement_metrics = PostgresStatementMetrics(self, self._config)
         self.statement_samples = PostgresStatementSamples(self, self._config)
@@ -882,6 +893,14 @@ class PostgreSql(AgentCheck):
         if self.dynamic_queries:
             for dynamic_query in self.dynamic_queries:
                 dynamic_query.execute()
+
+    def _uses_managed_authentication(self):
+        """Check if managed authentication is enabled for AWS or Azure."""
+        if 'aws' in self.cloud_metadata and 'managed_authentication' in self.cloud_metadata['aws']:
+            return self.cloud_metadata['aws']['managed_authentication']['enabled']
+        elif 'azure' in self.cloud_metadata:
+            return self.cloud_metadata['azure']['managed_authentication']['enabled']
+        return False
 
     def build_connection_args(self) -> PostgresConnectionArgs:
         if self._config.host == 'localhost' and self._config.password == '':

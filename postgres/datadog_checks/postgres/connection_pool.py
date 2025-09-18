@@ -6,7 +6,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 from psycopg import Connection
 from psycopg_pool import ConnectionPool
@@ -82,25 +82,34 @@ class LRUConnectionPoolManager:
     def __init__(
         self,
         max_db: int,
-        base_conn_args: PostgresConnectionArgs,
+        base_conn_args: Optional[PostgresConnectionArgs] = None,
+        conn_args_provider: Optional[Callable[[], PostgresConnectionArgs]] = None,
         pool_config: Optional[Dict[str, Any]] = None,
         statement_timeout: Optional[int] = None,  # milliseconds
         sqlascii_encodings: Optional[list[str]] = None,
+        token_refresh_ttl_s: int = 600,  # 10 minutes
     ) -> None:
         """
         Initialize the pool manager.
 
         Args:
             max_db (int): Maximum number of unique dbname pools to maintain.
-            base_conn_args (PostgresConnectionArgs): Common connection parameters.
+            base_conn_args (PostgresConnectionArgs, optional): Static connection parameters.
+            conn_args_provider (Callable, optional): Function to generate fresh connection args (for token refresh).
             pool_config (dict, optional): Additional ConnectionPool settings (min_size, max_size, etc).
             statement_timeout (int, optional): Statement timeout in milliseconds.
             sqlascii_encodings (list[str], optional): List of encodings to handle for SQLASCII text.
+            token_refresh_ttl_s (int): Time in seconds before refreshing connection args.
         """
+        if base_conn_args is None and conn_args_provider is None:
+            raise ValueError("Either base_conn_args or conn_args_provider must be provided")
+        
         self.max_db = max_db
         self.base_conn_args = base_conn_args
+        self.conn_args_provider = conn_args_provider
         self.statement_timeout = statement_timeout
         self.sqlascii_encodings = sqlascii_encodings
+        self.token_refresh_ttl_s = token_refresh_ttl_s
 
         self.pool_config = {
             **(pool_config or {}),
@@ -137,7 +146,13 @@ class LRUConnectionPoolManager:
         Returns:
             ConnectionPool: A new pool instance configured for the dbname.
         """
-        kwargs = self.base_conn_args.as_kwargs(dbname=dbname)
+        # Use provider for fresh args (e.g., new IAM token) or fallback to static args
+        if self.conn_args_provider is not None:
+            conn_args = self.conn_args_provider()
+        else:
+            conn_args = self.base_conn_args
+            
+        kwargs = conn_args.as_kwargs(dbname=dbname)
 
         return ConnectionPool(kwargs=kwargs, configure=self._configure_connection, **self.pool_config)
 
@@ -171,7 +186,15 @@ class LRUConnectionPoolManager:
 
             # Get or create pool
             if dbname in self.pools:
-                pool, _, was_persistent = self.pools.pop(dbname)
+                pool, last_used, was_persistent = self.pools.pop(dbname)
+                
+                # Check if we need to refresh the pool due to token expiry
+                if (self.conn_args_provider is not None and 
+                    now - last_used > self.token_refresh_ttl_s):
+                    # Close old pool and create new one with fresh token
+                    pool.close()
+                    pool = self._create_pool(dbname)
+                
                 self.pools[dbname] = (pool, now, was_persistent or persistent)
             else:
                 # Create new pool, potentially evicting old ones
