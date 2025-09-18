@@ -99,8 +99,10 @@ class LRUConnectionPoolManager:
             statement_timeout (int, optional): Statement timeout in milliseconds.
             sqlascii_encodings (list[str], optional): List of encodings to handle for SQLASCII text.
         """
+        if base_conn_args is None and conn_args_provider is None:
+            raise ValueError("Either base_conn_args or conn_args_provider must be provided")
+        
         self.max_db = max_db
-        # Exactly one of base_conn_args or conn_args_provider should be set.
         self.base_conn_args = base_conn_args
         self.conn_args_provider = conn_args_provider
         self.token_refresh_ttl_s = token_refresh_ttl_s
@@ -186,10 +188,12 @@ class LRUConnectionPoolManager:
                 if self.conn_args_provider is not None and (now - last_refreshed) >= self.token_refresh_ttl_s:
                     try:
                         pool.close()
-                    except Exception:
+                        pool = self._create_pool(dbname)
+                        last_refreshed = now
+                    except Exception as e:
+                        # Log token refresh failure but continue with existing pool
+                        # This prevents complete failure if token refresh fails temporarily
                         pass
-                    pool = self._create_pool(dbname)
-                    last_refreshed = now
                 self.pools[dbname] = (pool, now, was_persistent or persistent, last_refreshed)
             else:
                 # Create new pool, potentially evicting old ones

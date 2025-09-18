@@ -139,16 +139,18 @@ class PostgreSql(AgentCheck):
         self.set_resource_tags()
         self.pg_settings = {}
         self._warnings_by_code = {}
-        # Use dynamic per-connection args (fresh IAM token) when AWS managed auth is enabled.
+        # Use dynamic per-connection args (fresh IAM token) when managed auth is enabled.
         use_dynamic_conn_args = False
         try:
             if 'aws' in self.cloud_metadata and 'managed_authentication' in self.cloud_metadata['aws']:
                 use_dynamic_conn_args = bool(self.cloud_metadata['aws']['managed_authentication'].get('enabled'))
+            elif 'azure' in self.cloud_metadata and 'managed_authentication' in self.cloud_metadata['azure']:
+                use_dynamic_conn_args = bool(self.cloud_metadata['azure']['managed_authentication'].get('enabled'))
         except Exception:
             use_dynamic_conn_args = False
 
         if use_dynamic_conn_args:
-            self.log.debug("AWS managed auth enabled: enabling dynamic connection args for pool")
+            self.log.debug("Managed authentication enabled: using dynamic connection args for token refresh")
             self.db_pool = LRUConnectionPoolManager(
                 max_db=self._config.max_connections,
                 conn_args_provider=self.build_connection_args,
